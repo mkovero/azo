@@ -33,7 +33,20 @@ pub struct Host {
 
 impl Host {
 	pub fn new() -> Arc<Self> {
-		thread::spawn(WorkerContext::host_sta)
+		Self::from_join_handle(&thread::spawn(WorkerContext::host_sta))
+	}
+
+	/// Same as [`Self::new`], with the apartment's thread named `name` (visible in debuggers
+	/// and profilers, where the driver's own calls show up on it).
+	pub fn with_thread_name(name: impl Into<String>) -> std::io::Result<Arc<Self>> {
+		thread::Builder::new()
+		.name(name.into())
+		.spawn(WorkerContext::host_sta)
+		.map(|handle| Self::from_join_handle(&handle))
+	}
+
+	fn from_join_handle(handle: &thread::JoinHandle<()>) -> Arc<Self> {
+		handle
 		.as_raw_handle()
 		.pipe(HANDLE)
 		.pipe(|handle| unsafe { GetThreadId(handle) })
@@ -163,6 +176,7 @@ impl WorkerContext {
 					Method::DisposeBuffers                  => driver.dispose_buffers   (             ).pipe(|ret| self.respond(ret)),
 					Method::OpenControlPanel                => driver.open_control_panel(             ).pipe(|ret| self.respond(ret)),
 					Method::OutputReady                     => driver.output_ready      (             ).pipe(|ret| self.respond(ret)),
+					Method::RawInterface                    => windows_core::Interface::as_raw(&unsafe { driver.as_unsafe() }.0).pipe(|raw| self.respond(raw as usize)),
 					Method::CreateBuffers { channels, buffer_size, callbacks } => unsafe {
 						let ret = driver.create_buffers(channels, buffer_size, callbacks).map(Iterator::collect::<Vec<_>>);
 						self.respond(ret);
@@ -242,6 +256,7 @@ enum Method {
 	OpenControlPanel,
 	OutputReady,
 	
+	RawInterface,
 	CreateBuffers { channels: Vec<dto::ChannelId>, buffer_size: c_long, callbacks: *const sys::Callbacks},
 	Future { selector: sys::FutureSelector, opt: *mut c_void }
 }
@@ -262,6 +277,56 @@ impl Proxy {
 	
 	fn call<Return>(&self, method: Method) -> Return {
 		self.host.command_with_response(Command::CallMethod(self.token, method))
+	}
+}
+
+#[cfg(feature = "host")]
+impl Proxy {
+	/// A handle for the two calls a driver expects from inside its own
+	/// [`buffer_switch`](sys::Callbacks::buffer_switch) /
+	/// [`buffer_switch_time_info`](sys::Callbacks::buffer_switch_time_info) callback:
+	/// [`CallbackHandle::sample_position`] and [`CallbackHandle::output_ready`].
+	///
+	/// Those run on the driver's audio thread, where a round trip through the apartment's
+	/// message pump would block the callback, so they call the driver directly, as every
+	/// ASIO host does from its callback.
+	///
+	/// # Safety
+	/// The handle holds no reference of its own: it must not be used after `self` is
+	/// dropped, and only from inside the driver's callbacks.
+	#[must_use]
+	pub unsafe fn callback_handle(&self) -> CallbackHandle {
+		let raw = self.call::<usize>(Method::RawInterface) as *mut c_void;
+		// SAFETY: `raw` is the live interface pointer of the driver this proxy owns; wrapping
+		// it in `ManuallyDrop` keeps the handle from releasing a reference it never added.
+		CallbackHandle(std::mem::ManuallyDrop::new(driver::UnsafeHandle(unsafe {
+			windows_core::Interface::from_raw(raw)
+		})))
+	}
+}
+
+/// See [`Proxy::callback_handle`].
+#[cfg(feature = "host")]
+#[derive(Debug)]
+pub struct CallbackHandle(std::mem::ManuallyDrop<driver::UnsafeHandle>);
+
+// SAFETY: only the driver's own callback thread uses it, as the driver expects; it owns no
+// reference count, so dropping it on any thread touches nothing.
+#[cfg(feature = "host")]
+unsafe impl Send for CallbackHandle {}
+#[cfg(feature = "host")]
+unsafe impl Sync for CallbackHandle {}
+
+#[cfg(feature = "host")]
+impl CallbackHandle {
+	/// See [`Driver::sample_position`].
+	pub fn sample_position(&self) -> crate::Result<dto::SamplePosition> {
+		self.0.sample_position()
+	}
+
+	/// See [`Driver::output_ready`].
+	pub fn output_ready(&self) -> crate::Result<()> {
+		self.0.output_ready()
 	}
 }
 
