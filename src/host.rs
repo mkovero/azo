@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::ffi::{CString, c_long, c_void};
 use std::fmt::Debug;
 use std::os::windows::io::AsRawHandle;
@@ -122,7 +123,9 @@ impl Drop for Host {
 #[derive(Debug, Default)]
 struct WorkerContext {
 	next_token_val: Cell<usize>,
-	drivers: RefCell<HashMap<Token, driver::SafeHandle>>
+	// `Rc`, not a clone of the handle: a COM clone is an `AddRef`/`Release` pair, and some
+	// drivers (wineasio) tear their instance down on every `Release`, not only the last.
+	drivers: RefCell<HashMap<Token, Rc<driver::SafeHandle>>>
 }
 
 thread_local! {
@@ -201,8 +204,9 @@ impl WorkerContext {
 			}
 			
 			Command::CallMethod(token, method) => {
-				// A clone (one more reference) keeps the driver alive through the call even if
-				// a re-entrant `Release` removes it from the map meanwhile.
+				// A second `Rc` keeps the driver alive through the call even if a re-entrant
+				// `Release` removes it from the map meanwhile; the driver's own reference
+				// count is not touched.
 				let driver = WORKER
 				.with(|w| w.drivers.borrow().get(&token).cloned())
 				.expect("a proxy's driver lives until the proxy is dropped");
@@ -256,7 +260,7 @@ impl WorkerContext {
 		WORKER.with(|w| {
 			let token = Token(w.next_token_val.get());
 			w.next_token_val.set(token.0 + 1);
-			w.drivers.borrow_mut().insert(token, driver);
+			w.drivers.borrow_mut().insert(token, Rc::new(driver));
 			Ok(token)
 		})
 	}
