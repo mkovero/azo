@@ -31,6 +31,7 @@ fn main() {
 		"HWND_MESSAGE",
 		"GetModuleHandleW",
 		"PostMessageW",
+		"RegisterWindowMessageW",
 		"ERROR_CLASS_ALREADY_EXISTS",
 		"GetLastError",
 		"MSG"

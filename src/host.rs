@@ -4,7 +4,7 @@ use std::rc::Rc;
 use std::ffi::{CString, c_long, c_void};
 use std::fmt::Debug;
 use std::os::windows::io::AsRawHandle;
-use std::sync::{Arc, Once, mpsc};
+use std::sync::{Arc, Once, OnceLock, mpsc};
 use std::{ptr, thread};
 use std::time::Duration;
 use tap::Pipe;
@@ -94,7 +94,7 @@ impl Host {
 			let success = unsafe {
 				PostMessageW(
 					Some(HWND(self.window as _)),
-					WM_USER as _,
+					command_message(),
 					WPARAM(in_ as _),
 					LPARAM(out as _)
 				)
@@ -134,8 +134,21 @@ thread_local! {
 
 static REGISTER_CLASS: Once = Once::new();
 
+/// The message that carries a command to the host window. `WM_USER` would also arrive from any
+/// code that learns the window or posts to the apartment's thread (COM, a driver, a WASAPI
+/// layer under it), and its `wParam` would then be taken for a `Box<Command>`. A registered
+/// message number is unique in the session, so only this module's posts carry it.
+fn command_message() -> u32 {
+	static ID: OnceLock<u32> = OnceLock::new();
+	*ID.get_or_init(|| {
+		let id = unsafe { RegisterWindowMessageW(w!("azo.host.command.v1")) };
+		assert_ne!(id, 0, "RegisterWindowMessageW failed");
+		id
+	})
+}
+
 unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-	if message == WM_USER as u32 {
+	if message == command_message() {
 		unsafe { WorkerContext::handle_command(wparam, lparam); }
 		return LRESULT(0);
 	}
