@@ -8,6 +8,9 @@ use crate::future::AsioFuture;
 use crate::utils::{ResultCodeExt, cstring_from_bytes_until_nul};
 use crate::win::{CLSCTX_SERVER, COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, E_POINTER, HWND, S_FALSE};
 use sys::IIASIORedecl;
+
+/// Room for clock sources in one `getClockSources` call.
+pub const MAX_CLOCK_SOURCES: usize = 64;
 use tap::Pipe;
 use windows_core::{GUID, HSTRING};
 
@@ -61,7 +64,7 @@ pub trait Driver {
 	fn set_sample_rate(&self, sample_rate: sys::SampleRate) -> crate::Result<()>;
 	
 	/// Retrieves a list of all clock sources available to this driver.
-	fn clock_sources(&self) -> crate::Result<Vec<sys::ClockSource>>;
+	fn clock_sources(&self) -> crate::Result<Vec<dto::ClockSourceResponse>>;
 	
 	/// Selects a [`ClockSource`](sys::ClockSource), as enumerated via [`.clock_sources()`](Self::clock_sources)
 	fn set_clock_source(&self, clock_source: sys::ClockSourceIndex) -> crate::Result<()>;
@@ -208,7 +211,7 @@ impl Driver for SafeHandle {
 	fn can_sample_rate   (&self, sample_rate: sys::SampleRate       ) -> crate::Result<()>                       { self.0.can_sample_rate   (sample_rate  ) }
 	fn get_sample_rate   (&self                                     ) -> crate::Result<sys::SampleRate>          { self.0.get_sample_rate   (             ) }
 	fn set_sample_rate   (&self, sample_rate: sys::SampleRate       ) -> crate::Result<()>                       { self.0.set_sample_rate   (sample_rate  ) }
-	fn clock_sources     (&self                                     ) -> crate::Result<Vec<sys::ClockSource>>    { self.0.clock_sources     (             ) }
+	fn clock_sources     (&self                                     ) -> crate::Result<Vec<dto::ClockSourceResponse>> { self.0.clock_sources     (             ) }
 	fn set_clock_source  (&self, clock_source: sys::ClockSourceIndex) -> crate::Result<()>                       { self.0.set_clock_source  (clock_source ) }
 	fn sample_position   (&self                                     ) -> crate::Result<dto::SamplePosition>      { self.0.sample_position   (             ) }
 	fn channel_info      (&self, channel_id: dto::ChannelId         ) -> crate::Result<dto::ChannelInfoResponse> { self.0.channel_info      (channel_id   ) }
@@ -360,28 +363,18 @@ impl Driver for UnsafeHandle {
 		.to_result()
 	}
 
-	#[expect(clippy::panic_in_result_fn, reason = "invalid driver behaviour")]
-	fn clock_sources(&self) -> crate::Result<Vec<sys::ClockSource>> {
-		let mut count = 1; // on input this is the # of requested items
-		let mut first = MaybeUninit::uninit();
+	/// Asks once, with room for [`MAX_CLOCK_SOURCES`]: drivers that ignore the requested
+	/// count and write every source they have would overrun a smaller array.
+	fn clock_sources(&self) -> crate::Result<Vec<dto::ClockSourceResponse>> {
+		let mut all = Vec::<sys::ClockSource>::with_capacity(MAX_CLOCK_SOURCES);
+		let mut count = MAX_CLOCK_SOURCES as c_long; // on input this is the # of requested items
 		
-		unsafe { self.0.get_clock_sources(first.as_mut_ptr(), &raw mut count) }
+		unsafe { self.0.get_clock_sources(all.spare_capacity_mut().as_mut_ptr().cast(), &raw mut count) }
 		.to_result()?;
-	
-		match count {
-			0   => Ok(vec![]),
-			1   => Ok(vec![unsafe { first.assume_init() }]),
-			2.. => {
-				let mut all = Vec::<sys::ClockSource>::with_capacity(count as _);
-				
-				unsafe { self.0.get_clock_sources(all.spare_capacity_mut().as_mut_ptr().cast(), &raw mut count) }
-				.to_result()?;
-			
-				unsafe { all.set_len(count as _); }
-				Ok(all)
-			}
-			neg => panic!("driver reported negative number of clock sources ({neg})")
-		}
+		
+		let count = usize::try_from(count).unwrap_or(0).min(MAX_CLOCK_SOURCES);
+		unsafe { all.set_len(count); }
+		Ok(all.into_iter().map(Into::into).collect())
 	}
 
 	/// Selects a [`ClockSource`](sys::ClockSource), as enumerated via [`.clock_sources()`](Self::clock_sources)

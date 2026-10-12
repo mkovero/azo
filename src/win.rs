@@ -6,6 +6,7 @@
     clippy::must_use_candidate,
     clippy::borrow_as_ptr,
     clippy::ptr_as_ptr,
+    clippy::too_many_arguments,
     reason = "generated"
 )]
 
