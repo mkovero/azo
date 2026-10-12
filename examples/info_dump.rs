@@ -1,4 +1,3 @@
-use std::ffi::CStr;
 use azo::driver;
 use azo::driver::Driver;
 use azo::dto::{ChannelId, Latencies};
@@ -128,15 +127,14 @@ fn dump_info(driver: &impl Driver) -> azo::Result<()> {
 	
 	let clock_sources = driver.clock_sources()?;
 
-	#[expect(clippy::unwrap_in_result, reason = "simplicity")]
 	for clock_source in clock_sources {
 		println!(
 			"{}\t{}\t{}\t{}\t{:?}",
 			clock_source.index,
 			clock_source.associated_channel,
 			clock_source.associated_group,
-			bool::try_from(clock_source.is_current_source).expect("invalid value"),
-			CStr::from_bytes_until_nul(&clock_source.name).expect("buffer overflow")
+			clock_source.is_current,
+			clock_source.name
 		);
 	}
 	
