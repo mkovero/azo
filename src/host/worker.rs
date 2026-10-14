@@ -1,6 +1,8 @@
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::mem::MaybeUninit;
+use std::rc::Rc;
 use std::sync::LazyLock;
 use std::{ptr, thread};
 use tap::Pipe;
@@ -30,7 +32,7 @@ pub fn spawn() -> oneshot::Receiver<SendHWND> {
 		let window_handle = unsafe { CreateWindowExW(0, MAKEINTATOM(WINDOW_CLASS.0), None, 0, 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None) };
 		sender.send(SendHWND(window_handle)).expect("receiver dropped prematurely");
 
-		let mut context = Context::default();
+		let context = Context::default();
 		context.set(window_handle);
 
 		pump();
@@ -76,15 +78,20 @@ fn write_response<Out>(l_param: LPARAM, value: Out) {
 	.write(value);
 }
 
+/// Messages reach the window procedure re-entrantly: a driver call that runs a modal loop
+/// (a control panel dialog) dispatches the messages sent meanwhile from inside that call.
+/// Hence shared access only, and no borrow of `drivers` held across a driver call.
 #[derive(Debug, Default)]
 struct Context {
-	next_token_val: usize,
-	drivers: HashMap<Token, driver::SafeHandle>
+	next_token_val: Cell<usize>,
+	// `Rc`, not a clone of the handle: a COM clone is an `AddRef`/`Release` pair, and some
+	// drivers (wineasio) tear their instance down on every `Release`, not only the last.
+	drivers: RefCell<HashMap<Token, Rc<driver::SafeHandle>>>
 }
 
 impl Context {
-	fn set(&mut self, window_handle: HWND) {
-		let self_raw: *mut Self = self; // prefer coercing over casting
+	fn set(&self, window_handle: HWND) {
+		let self_raw: *const Self = self; // prefer coercing over casting
 		unsafe {
 			SetWindowLongPtrW(
 				window_handle,
@@ -94,17 +101,17 @@ impl Context {
 		}
 	}
 	
-	fn get<'ctx>(window_handle: HWND) -> &'ctx mut Self {
+	fn get<'ctx>(window_handle: HWND) -> &'ctx Self {
 		unsafe {
 			GetWindowLongPtrW(window_handle, GWLP_USERDATA)
 			.cast_unsigned()
-			.pipe(ptr::with_exposed_provenance_mut::<Self>)
-			.as_mut()
+			.pipe(ptr::with_exposed_provenance::<Self>)
+			.as_ref()
 			.expect("invalid GWLP_USERDATA")
 		}
 	}
 	
-	fn create_driver(&mut self, in_: WPARAM, out: LPARAM) {
+	fn create_driver(&self, in_: WPARAM, out: LPARAM) {
 		in_
 		.0
 		.pipe(ptr::with_exposed_provenance::<GUID>)
@@ -115,15 +122,15 @@ impl Context {
 		.pipe(|result| write_response(out, result));
 	}
 	
-	fn register_driver(&mut self, driver: driver::SafeHandle) -> Token {
+	fn register_driver(&self, driver: driver::SafeHandle) -> Token {
 		let token = self.create_token();
-		self.drivers.insert(token, driver);
+		self.drivers.borrow_mut().insert(token, Rc::new(driver));
 		token
 	}
 	
-	const fn create_token(&mut self) -> Token {
-		let token = Token(self.next_token_val);
-		self.next_token_val += 1;
+	fn create_token(&self) -> Token {
+		let token = Token(self.next_token_val.get());
+		self.next_token_val.set(token.0 + 1);
 		token
 	}
 	
@@ -137,7 +144,15 @@ impl Context {
 			.take()
 			.expect("command missing");
 		
-		let driver = &self.drivers[&token];
+		// A second `Rc` keeps the driver alive through the call even if a re-entrant release
+		// removes it from the map meanwhile; the driver's own reference count is not touched.
+		let driver =
+			self
+			.drivers
+			.borrow()
+			.get(&token)
+			.cloned()
+			.expect("a proxy's driver lives until the proxy is dropped");
 				
 		match method {
 			Method::Init { window_handle }          => driver.init              (window_handle).pipe(|ret| write_response(out, ret)),
@@ -176,7 +191,9 @@ impl Context {
 		}
 	}
 	
-	fn release_driver(&mut self, in_: WPARAM) {
-		drop(self.drivers.remove(&Token(in_.0)));
+	fn release_driver(&self, in_: WPARAM) {
+		// Dropped after the map's borrow ends: the driver's `Release` may dispatch messages.
+		let driver = self.drivers.borrow_mut().remove(&Token(in_.0));
+		drop(driver);
 	}
 }
