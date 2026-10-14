@@ -6,12 +6,16 @@ use crate::{Error, WinResult};
 use crate::win::*;
 
 /// Somehow [`CString`] has no equivalent of [`CStr::from_bytes_until_nul`] - <https://github.com/rust-lang/rust/pull/96186>
+///
+/// Drivers fill fixed-size name buffers (32 bytes for driver, channel and clock source names),
+/// and a name that uses every byte leaves no room for the terminating NUL. Such a name is taken
+/// whole rather than treated as a driver fault.
 #[must_use]
 pub fn cstring_from_bytes_until_nul(buffer: &[u8]) -> CString {
-    CStr
-    ::from_bytes_until_nul(buffer)
-    .expect("buffer overflow")
-    .to_owned()
+    match CStr::from_bytes_until_nul(buffer) {
+        Ok(name) => name.to_owned(),
+        Err(_) => CString::new(buffer).expect("no interior NUL: `from_bytes_until_nul` found none")
+    }
 }
 
 pub trait ResultCodeExt {
@@ -60,5 +64,16 @@ impl Clone for COMInit {
 impl Drop for COMInit {
     fn drop(&mut self) {
         unsafe { CoUninitialize(); }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cstring_from_bytes_until_nul;
+
+    #[test]
+    fn names_stop_at_the_first_nul_or_fill_the_buffer() {
+        assert_eq!(cstring_from_bytes_until_nul(b"Analog 1\0junk").as_bytes(), b"Analog 1");
+        assert_eq!(cstring_from_bytes_until_nul(&[b'x'; 32]).as_bytes(), &[b'x'; 32]);
     }
 }

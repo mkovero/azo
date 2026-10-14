@@ -14,6 +14,9 @@ use windows_core::{GUID, HSTRING};
 #[cfg(feature = "host")]
 pub use crate::host::Proxy;
 
+/// The spec's size of a driver, channel or clock source name buffer, NUL included.
+const NAME_LEN: usize = 32;
+
 pub trait Driver {
 	/// The spec unfortunately does not elaborate on the purpose of the parameter.
 	#[must_use]
@@ -249,9 +252,11 @@ impl Driver for UnsafeHandle {
 	}
 
 	fn name(&self) -> CString {
-		let mut buf = [0_u8; 32];
+		// The spec allows 32 bytes, NUL included, but drivers that write a 32-character name
+		// put its NUL one past the end; the room after the first 32 bytes takes that overrun.
+		let mut buf = [0_u8; 2 * NAME_LEN];
 		unsafe { self.0.get_driver_name(buf.as_mut_ptr()); }
-		cstring_from_bytes_until_nul(&buf)
+		cstring_from_bytes_until_nul(&buf[..NAME_LEN])
 	}
 
 	fn version(&self) -> sys::DriverVersion {
@@ -379,14 +384,21 @@ impl Driver for UnsafeHandle {
 	}
 
 	fn channel_info(&self, channel_id: dto::ChannelId) -> crate::Result<dto::ChannelInfoResponse> {
-		let mut info =
+		// A spare entry after the one asked about takes a driver that writes its name's NUL
+		// past the 32-byte field, which is the struct's last.
+		let mut infos = [
 			sys::ChannelInfo {
 				channel: channel_id.index,
 				is_input: channel_id.input.into(),
 				..unsafe { mem::zeroed() }
-			};
-		unsafe { self.0.get_channel_info(&raw mut info) }
-    	.to_result_with(|| info.into())
+			},
+			unsafe { mem::zeroed() }
+		];
+		unsafe { self.0.get_channel_info(infos.as_mut_ptr()) }
+    	.to_result_with(|| {
+			let [info, _spare] = infos;
+			info.into()
+		})
 	}
 
 	unsafe fn create_buffers(
