@@ -3,12 +3,14 @@ mod worker;
 
 use std::ffi::{CString, c_long, c_void};
 use std::fmt::Debug;
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
+use std::ptr;
 use std::sync::Arc;
+use std::thread;
 use tap::Pipe;
 use windows_core::GUID;
 use crate::{WinResult, dto, sys};
-use crate::driver::Driver;
+use crate::driver::{self, Driver};
 use crate::future::AsioFuture;
 use crate::win::*;
 
@@ -40,6 +42,7 @@ enum Method {
 	OpenControlPanel,
 	OutputReady,
 	
+	RawInterface,
 	CreateBuffers { channels: Vec<dto::ChannelId>, buffer_size: c_long, callbacks: *const sys::Callbacks},
 	Future { selector: sys::FutureSelector, opt: *mut c_void }
 }
@@ -61,11 +64,22 @@ pub struct Host(SendHWND);
 
 impl Host {
 	pub fn new() -> Arc<Self> {
-		worker::spawn()
+		Self::spawn(thread::Builder::new()).expect("failed to spawn thread")
+	}
+	
+	/// Same as [`Self::new`], with the apartment's thread named `name` (visible in debuggers
+	/// and profilers, where the driver's own calls show up on it).
+	pub fn with_thread_name(name: impl Into<String>) -> std::io::Result<Arc<Self>> {
+		Self::spawn(thread::Builder::new().name(name.into()))
+	}
+	
+	fn spawn(builder: thread::Builder) -> std::io::Result<Arc<Self>> {
+		worker::spawn(builder)?
 		.recv()
 		.expect("worker shouldn't drop the sender")
 		.pipe(Self)
 		.pipe(Arc::new)
+		.pipe(Ok)
 	}
 	
 	/// Creates an instance of a driver in this host's STA and returns a [`Proxy`] for interacting with that driver,
@@ -150,6 +164,51 @@ impl Proxy {
 	
 	fn call<Return>(&self, method: Method) -> Return {
 		self.host.call_method(self.token, method)
+	}
+}
+
+impl Proxy {
+	/// A handle for the two calls a driver expects from inside its own
+	/// [`buffer_switch`](sys::Callbacks::buffer_switch) /
+	/// [`buffer_switch_time_info`](sys::Callbacks::buffer_switch_time_info) callback:
+	/// [`CallbackHandle::sample_position`] and [`CallbackHandle::output_ready`].
+	///
+	/// Those run on the driver's audio thread, where a round trip through the apartment's
+	/// message window would block the callback, so they call the driver directly, as every
+	/// ASIO host does from its callback.
+	///
+	/// # Safety
+	/// The handle holds no reference of its own: it must not be used after `self` is
+	/// dropped, and only from inside the driver's callbacks.
+	#[must_use]
+	pub unsafe fn callback_handle(&self) -> CallbackHandle {
+		let raw = ptr::with_exposed_provenance_mut::<c_void>(self.call::<usize>(Method::RawInterface));
+		// SAFETY: `raw` is the live interface pointer of the driver this proxy owns; wrapping
+		// it in `ManuallyDrop` keeps the handle from releasing a reference it never added.
+		CallbackHandle(ManuallyDrop::new(driver::UnsafeHandle(unsafe {
+			windows_core::Interface::from_raw(raw)
+		})))
+	}
+}
+
+/// See [`Proxy::callback_handle`].
+#[derive(Debug)]
+pub struct CallbackHandle(ManuallyDrop<driver::UnsafeHandle>);
+
+// SAFETY: only the driver's own callback thread uses it, as the driver expects; it owns no
+// reference count, so dropping it on any thread touches nothing.
+unsafe impl Send for CallbackHandle {}
+unsafe impl Sync for CallbackHandle {}
+
+impl CallbackHandle {
+	/// See [`Driver::sample_position`].
+	pub fn sample_position(&self) -> crate::Result<dto::SamplePosition> {
+		self.0.sample_position()
+	}
+	
+	/// See [`Driver::output_ready`].
+	pub fn output_ready(&self) -> crate::Result<()> {
+		self.0.output_ready()
 	}
 }
 

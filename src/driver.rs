@@ -12,7 +12,7 @@ use tap::Pipe;
 use windows_core::{GUID, HSTRING};
 
 #[cfg(feature = "host")]
-pub use crate::host::Proxy;
+pub use crate::host::{CallbackHandle, Proxy};
 
 /// The spec's size of a driver, channel or clock source name buffer, NUL included.
 const NAME_LEN: usize = 32;

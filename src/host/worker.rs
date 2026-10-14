@@ -25,10 +25,10 @@ static WINDOW_CLASS: LazyLock<ATOM> = LazyLock::new(||
 	.pipe(|class| unsafe { RegisterClassW(&raw const class) })
 );
 
-pub fn spawn() -> oneshot::Receiver<SendHWND> {
+pub fn spawn(builder: thread::Builder) -> std::io::Result<oneshot::Receiver<SendHWND>> {
 	let (sender, receiver) = oneshot::channel::<SendHWND>();
 		
-	thread::spawn(move || {
+	builder.spawn(move || {
 		let window_handle = unsafe { CreateWindowExW(0, MAKEINTATOM(WINDOW_CLASS.0), None, 0, 0, 0, 0, 0, Some(HWND_MESSAGE), None, None, None) };
 		sender.send(SendHWND(window_handle)).expect("receiver dropped prematurely");
 
@@ -36,9 +36,9 @@ pub fn spawn() -> oneshot::Receiver<SendHWND> {
 		context.set(window_handle);
 
 		pump();
-	});
+	})?;
 	
-	receiver
+	Ok(receiver)
 }
 
 fn pump() {
@@ -174,6 +174,7 @@ impl Context {
 			Method::DisposeBuffers                  => driver.dispose_buffers   (             ).pipe(|ret| write_response(out, ret)),
 			Method::OpenControlPanel                => driver.open_control_panel(             ).pipe(|ret| write_response(out, ret)),
 			Method::OutputReady                     => driver.output_ready      (             ).pipe(|ret| write_response(out, ret)),
+			Method::RawInterface                    => windows_core::Interface::as_raw(&unsafe { driver.as_unsafe() }.0).pipe(|raw| write_response(out, raw.expose_provenance())),
 			Method::CreateBuffers { channels, buffer_size, callbacks } => unsafe {
 				driver
 				.create_buffers(channels, buffer_size, callbacks)
