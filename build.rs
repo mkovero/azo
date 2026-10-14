@@ -8,7 +8,6 @@ fn main() {
 	builder.filters([
 		"CoInitializeEx",
 		"COINIT_APARTMENTTHREADED",
-		"CoCreateInstance",
 		"CLSCTX_SERVER",
 		"S_OK",
 		"S_FALSE",
