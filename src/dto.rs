@@ -58,6 +58,32 @@ impl From<sys::ChannelInfo> for ChannelInfoResponse {
     }
 }
 
+/// A clock source as the driver lists it, with its name cut at the first NUL: drivers
+/// leave whatever was in their 32-byte buffer after the terminator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ClockSourceResponse {
+	/// For use in [`Driver::set_clock_source()`](crate::driver::Driver::set_clock_source)
+	pub index             : sys::ClockSourceIndex,
+	/// E.g. S/PDIF, AES/EBU
+	pub associated_channel: sys::ChannelIndex,
+	pub associated_group  : sys::ChannelGroupIndex,
+	/// The source the driver currently runs on.
+	pub is_current        : bool,
+	pub name              : CString
+}
+
+impl From<sys::ClockSource> for ClockSourceResponse {
+	fn from(value: sys::ClockSource) -> Self {
+		Self {
+			index             : value.index,
+			associated_channel: value.associated_channel,
+			associated_group  : value.associated_group,
+			is_current        : value.is_current_source.try_into().unwrap_or(false),
+			name              : cstring_from_bytes_until_nul(&value.name)
+		}
+	}
+}
+
 /// Technically, [`Self::min`] and [`Self::max`] should be guarded by the same [`Option`] as [`Self::granularity`],
 /// as the spec states that `min == max` requires `granularity == 0`.
 /// Practically however:
