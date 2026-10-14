@@ -260,3 +260,10 @@ impl Driver for Proxy {
 		self.call(Method::Future { selector: T::SELECTOR, opt: <*mut _>::cast(param) })
 	}
 }
+
+// `Arc<Host>` and `Proxy` have to cross threads, as their docs promise.
+const _: () = {
+	const fn assert_send_sync<T: Send + Sync>() {}
+	assert_send_sync::<Host>();
+	assert_send_sync::<Proxy>();
+};
